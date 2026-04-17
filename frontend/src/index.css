@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Base Styles ─── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+  min-height: 100vh;
+  color: #e2e8f0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+::-webkit-scrollbar-thumb {
+  background: #4f46e5;
+  border-radius: 3px;
+}
+
+/* ─── Glassmorphism Card ─── */
+@layer components {
+  .glass-card {
+    @apply rounded-2xl border border-white/10 shadow-xl;
+    background: rgba(30, 41, 59, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-300;
+  }
+  .glass-card-hover:hover {
+    @apply border-brand-400/30 shadow-brand-500/10;
+    transform: translateY(-2px);
+  }
+
+  /* Risk progress bar background */
+  .risk-track {
+    @apply w-full h-3 rounded-full overflow-hidden;
+    background: rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* ─── Vital card pulse animation ─── */
+@keyframes vital-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.0); }
+  50% { box-shadow: 0 0 0 6px rgba(99, 102, 241, 0.15); }
+}
+.vital-update {
+  animation: vital-pulse 0.6s ease-out;
+}
