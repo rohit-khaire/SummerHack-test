@@ -1,12 +1,16 @@
 """
-main.py — FastAPI application for the Digital Twin Patient system.
+main.py — FastAPI application for the Digital Twin Patient system v4.0.
 
 Features:
-    • Background task that generates vitals every 2 s and stores them
-    • REST endpoints for vitals, prediction, and what-if simulation
-    • Advanced simulation with health score, segmentation, recommendations
-    • WebSocket endpoint that pushes live vitals to connected dashboards
-    • Early warning system for dangerous trends
+    • Stable vital generation with EMA smoothing (no random jumps)
+    • Demo spike/dip buttons for controlled demonstration
+    • Disease classification (Normal / Pre-Diabetic / Diabetic / High CV Risk)
+    • Health score progression tracking
+    • Trend intelligence & stability indicators
+    • Intervention impact scores
+    • Structured AI responses (JSON, not raw text)
+    • WebSocket real-time vitals with rich metadata
+    • REST endpoints with comprehensive clinical decision support
 """
 
 import asyncio
@@ -20,8 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from database import connect_db, close_db, insert_vitals, get_latest_vitals, get_vitals_history
-from simulator import generate_vitals, apply_simulation, simulate_advanced
-from model import predict_risk, assess_risk_advanced
+from simulator import generate_vitals, apply_simulation, simulate_advanced, vital_generator
+from model import predict_risk, assess_risk_advanced, classify_disease
 from patient import PatientProfile, compute_modifiers
 from groq_explain import generate_explanations
 from health_engine import (
@@ -30,6 +34,9 @@ from health_engine import (
     generate_recommendations,
     check_early_warnings,
     generate_groq_recommendations,
+    compute_trend_intelligence,
+    compute_intervention_impact,
+    compute_stability_indicator,
 )
 
 # ---------------------------------------------------------------------------
@@ -63,11 +70,20 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # ---------------------------------------------------------------------------
+# Health score progression tracker
+# ---------------------------------------------------------------------------
+
+_previous_health_score: float | None = None
+
+
+# ---------------------------------------------------------------------------
 # Background vitals generator
 # ---------------------------------------------------------------------------
 
 async def vitals_loop():
     """Generate vitals every 2 seconds, store in DB, and broadcast via WS."""
+    global _previous_health_score
+
     while True:
         vitals = generate_vitals()
         await insert_vitals(vitals)
@@ -79,17 +95,48 @@ async def vitals_loop():
             vitals["sleep_hours"],
         )
 
-        # Compute mini health score for live dashboard
+        # Compute health score
         hs = compute_health_score(
             vitals["heart_rate"], vitals["glucose"],
             vitals["steps"], vitals["sleep_hours"],
         )
+
+        # Disease classification on live data
+        disease = classify_disease(
+            vitals["heart_rate"], vitals["glucose"],
+            vitals["steps"], vitals["sleep_hours"],
+        )
+
+        # Stability metrics from generator
+        stability = vital_generator.get_stability_metrics()
+
+        # Trend analysis from generator
+        trend = vital_generator.get_trend_analysis()
+
+        # Health score progression
+        current_hs = hs["health_score"]
+        hs_progression = None
+        if _previous_health_score is not None:
+            hs_change = current_hs - _previous_health_score
+            if abs(hs_change) >= 0.5:
+                hs_progression = {
+                    "from": round(_previous_health_score, 1),
+                    "to": round(current_hs, 1),
+                    "change": round(hs_change, 1),
+                    "direction": "improved" if hs_change > 0 else "declined",
+                }
+        _previous_health_score = current_hs
 
         broadcast_data = {
             **vitals,
             "risk_score": risk,
             "health_score": hs["health_score"],
             "health_grade": hs["grade"],
+            "disease_classification": disease["classification"],
+            "disease_confidence": disease["confidence"],
+            "stability_status": stability["status"],
+            "trend_data": trend if trend.get("available") else None,
+            "hs_progression": hs_progression,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await manager.broadcast(broadcast_data)
@@ -104,7 +151,7 @@ async def vitals_loop():
 async def lifespan(app: FastAPI):
     await connect_db()
     task = asyncio.create_task(vitals_loop())
-    print("🚀 Vitals background loop started")
+    print("🚀 Vitals background loop started (EMA-smoothed, stable output)")
     yield
     task.cancel()
     await close_db()
@@ -115,8 +162,8 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Digital Twin — Patient Decision Support System",
-    version="3.0.0",
+    title="Digital Twin — Clinical Decision Support System",
+    version="4.0.0",
     lifespan=lifespan,
 )
 
@@ -152,6 +199,10 @@ class AdvancedSimulationRequest(BaseModel):
     simulation_days: int = Field(default=14, ge=1, le=90)
 
 
+class SpikeRequest(BaseModel):
+    direction: str = Field(default="up", description="'up' for spike, 'down' for dip")
+
+
 # ---------------------------------------------------------------------------
 # REST endpoints
 # ---------------------------------------------------------------------------
@@ -161,7 +212,17 @@ async def latest_vitals():
     vitals = await get_latest_vitals()
     if not vitals:
         return {"message": "No vitals recorded yet"}
-    return vitals
+
+    disease_classification = classify_disease(
+        vitals["heart_rate"],
+        vitals["glucose"],
+        vitals["steps"],
+        vitals["sleep_hours"],
+    )
+    return {
+        **vitals,
+        "disease_classification": disease_classification,
+    }
 
 
 @app.get("/vitals/history")
@@ -179,7 +240,55 @@ async def predict():
         vitals["heart_rate"], vitals["glucose"],
         vitals["steps"], vitals["sleep_hours"],
     )
-    return {"risk_score": score}
+    disease = classify_disease(
+        vitals["heart_rate"], vitals["glucose"],
+        vitals["steps"], vitals["sleep_hours"],
+    )
+    return {
+        "risk_score": score,
+        "disease_classification": disease,
+    }
+
+
+# ── Demo Spike/Dip Endpoint ──
+@app.post("/demo-spike")
+async def demo_spike(req: SpikeRequest):
+    """Trigger a demo spike (up) or dip (down) in vitals for demonstration."""
+    result = vital_generator.trigger_spike(direction=req.direction)
+    return result
+
+
+# ── Health Summary (new endpoint) ──
+@app.get("/health-summary")
+async def health_summary():
+    """Get a comprehensive health summary including all metrics."""
+    vitals = await get_latest_vitals()
+    if not vitals:
+        return {"message": "No vitals recorded yet"}
+
+    risk = predict_risk(
+        vitals["heart_rate"], vitals["glucose"],
+        vitals["steps"], vitals["sleep_hours"],
+    )
+    hs = compute_health_score(
+        vitals["heart_rate"], vitals["glucose"],
+        vitals["steps"], vitals["sleep_hours"],
+    )
+    disease = classify_disease(
+        vitals["heart_rate"], vitals["glucose"],
+        vitals["steps"], vitals["sleep_hours"],
+    )
+    stability = vital_generator.get_stability_metrics()
+    trend = vital_generator.get_trend_analysis()
+
+    return {
+        "vitals": {k: vitals[k] for k in ["heart_rate", "glucose", "steps", "sleep_hours"]},
+        "risk_score": risk,
+        "health_score": hs,
+        "disease_classification": disease,
+        "stability": stability,
+        "trend_analysis": trend,
+    }
 
 
 @app.post("/simulate")
@@ -215,7 +324,8 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
 
     Returns: time-series projection, risk assessment, health score,
     patient segmentation, personalized recommendations, early warnings,
-    explainability, and optional Groq AI action plan.
+    disease classification, trend intelligence, intervention impact,
+    stability indicator, and structured AI analysis.
     """
     vitals = await get_latest_vitals()
     if not vitals:
@@ -320,7 +430,7 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
         patient_conditions=profile.conditions,
     )
 
-    # ── Explanations (rule-based + Groq) ──
+    # ── Explanations (rule-based + structured Groq) ──
     explain_result = await generate_explanations(
         baseline=baseline,
         final_vitals=final_day,
@@ -334,7 +444,7 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
         feature_contributions=risk_after.get("feature_contributions"),
     )
 
-    # ── Groq AI Action Plan (in parallel with above) ──
+    # ── Groq AI Action Plan (structured JSON) ──
     ai_action_plan = await generate_groq_recommendations(
         health_score=health_after,
         segment=segment,
@@ -350,6 +460,25 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
         calorie_intake=req.calorie_intake,
         simulation_days=req.simulation_days,
     )
+
+    # ── Trend Intelligence (NEW) ──
+    trend_intelligence = compute_trend_intelligence(
+        baseline_vitals=baseline,
+        final_vitals=final_day,
+        simulation_days=req.simulation_days,
+    )
+
+    # ── Intervention Impact (NEW) ──
+    intervention_impact = compute_intervention_impact(
+        exercise_minutes=req.exercise_minutes,
+        sleep_hours=req.sleep_hours,
+        calorie_intake=req.calorie_intake,
+        risk_before=risk_before["risk_score"],
+        risk_after=risk_after["risk_score"],
+    )
+
+    # ── Stability Indicator (NEW) ──
+    stability = compute_stability_indicator(timeline)
 
     # ── Profile metadata ──
     mods = compute_modifiers(profile)
@@ -380,27 +509,39 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
             "adaptation_rate": mods["adaptation_rate"],
         },
 
-        # Vitals
+        # Vitals data (for display: "Here's what we're analyzing")
         "baseline_vitals": baseline,
         "future_vitals": timeline,
 
         # Risk
         "risk_before": risk_before,
-        "risk_after": risk_after,
-        "improvement_percent": improvement_pct,
+        "risk_after": risk_after,        "disease_classification": risk_before.get("disease_classification"),
+        "disease_classification_after": risk_after.get("disease_classification"),        "improvement_percent": improvement_pct,
 
-        # Health Score (NEW)
+        # Health Score
         "health_score_before": health_before,
         "health_score_after": health_after,
 
-        # Patient Segment (NEW)
+        # Patient Segment
         "patient_segment": segment,
 
-        # Recommendations (NEW)
+        # Disease Classification (NEW)
+        "disease_classification": risk_after.get("disease_classification", {}),
+
+        # Recommendations
         "recommendations": recommendations,
 
-        # Early Warnings (NEW)
+        # Early Warnings
         "early_warnings": warnings,
+
+        # Trend Intelligence (NEW)
+        "trend_intelligence": trend_intelligence,
+
+        # Intervention Impact (NEW)
+        "intervention_impact": intervention_impact,
+
+        # Stability Indicator (NEW)
+        "stability_indicator": stability,
 
         # Explainability
         "explanation": explain_result["explanations"],
@@ -410,15 +551,17 @@ async def simulate_advanced_endpoint(req: AdvancedSimulationRequest):
         # Anomalies
         "anomalies": unique_anomalies,
 
-        # Model trust metadata (NEW)
+        # Model trust metadata
         "model_info": {
+            "type": model_meta.get("model_type", "Ensemble"),
             "dataset": f"{model_meta.get('pima_samples', 0)} PIMA + {model_meta.get('synthetic_samples', 0)} synthetic",
             "accuracy_r2": model_meta.get("r2", "N/A"),
             "accuracy_mae": model_meta.get("mae", "N/A"),
+            "disease_accuracy": model_meta.get("disease_accuracy", "N/A"),
             "features_used": model_meta.get("features", []),
         },
 
-        # Disclaimer (NEW)
+        # Disclaimer
         "disclaimer": (
             "This system is a simulation tool for educational and research purposes only. "
             "It does not provide medical diagnoses. Always consult a qualified healthcare "

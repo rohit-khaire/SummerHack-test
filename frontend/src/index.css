@@ -62,3 +62,21 @@ body {
 .vital-update {
   animation: vital-pulse 0.6s ease-out;
 }
+
+/* ─── Smooth number transitions ─── */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Text overflow prevention (no half words) ─── */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Ensure no word-break issues ─── */
+p, span, div {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
